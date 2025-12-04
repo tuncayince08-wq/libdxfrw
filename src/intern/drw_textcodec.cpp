@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cstring>
 #include <iconv.h>
+#include <vector>
 #include "../drw_base.h"
 #include "drw_cptables.h"
 #include "drw_cptable932.h"
@@ -471,31 +472,89 @@ std::string DRW_ConvUTF16::toUtf8(std::string *s){//RLZ: pending to write
     return res;
 }
 
-std::string DRW_ExtConverter::convertByiconv(const char *in_encode,
-                                             const char *out_encode,
-                                             const std::string *s) {
-    const int BUF_SIZE = 1000;
-    static char in_buf[BUF_SIZE], out_buf[BUF_SIZE];
+std::string DRW_ExtConverter::convertByIconv(const char *in_encode, const char *out_encode, const std::string &s) {
+    // Aç
+    iconv_t cd = iconv_open(out_encode, in_encode);
+    if (cd == (iconv_t)-1) {
+        // iconv_open başarısız oldu
+        throw std::runtime_error(std::string("iconv_open failed: ") + std::strerror(errno));
+    }
 
-	char *in_ptr = in_buf;
-	char *out_ptr = out_buf;
-    strncpy(in_buf, s->c_str(), BUF_SIZE);
+    // Girdi pointer ve kalan bayt sayısı
+    size_t in_bytes_left = s.size();
+    // iconv API'sine göre char* olmalı (bazı implementasyonlar const char** kabul etmez)
+    char *in_buf = const_cast<char*>(s.data());
+    char *in_ptr = in_buf;
 
-    iconv_t ic;
-    ic = iconv_open(out_encode, in_encode);
-    size_t il = BUF_SIZE-1, ol = BUF_SIZE-1;
-    iconv(ic , (char**)&in_ptr, &il, &out_ptr, &ol);
-    iconv_close(ic);
+    // Çıktı buffer'ı: başlangıçta makul bir boyut ayarla (ör. giriş * 4 + 16)
+    size_t out_buf_size = std::max((size_t)64, in_bytes_left * 4 + 16);
+    std::vector<char> out_buf(out_buf_size);
+    char *out_ptr = out_buf.data();
+    size_t out_bytes_left = out_buf_size;
 
-    return std::string(out_buf);
+    // Döngü: iconv çağır, E2BIG ise buffer büyüt
+    while (in_bytes_left > 0) {
+        // iconv: 2.,3.,4.,5. parametre tipleri: char** , size_t* , char** , size_t*
+        size_t res = iconv(cd, &in_ptr, &in_bytes_left, &out_ptr, &out_bytes_left);
+        if (res == (size_t)-1) {
+            if (errno == E2BIG) {
+                // output buffer doldu -> boyutu büyüt
+                size_t used = out_buf_size - out_bytes_left;
+                out_buf_size *= 2;
+                out_buf.resize(out_buf_size);
+                out_ptr = out_buf.data() + used;
+                out_bytes_left = out_buf_size - used;
+                continue; // tekrar dene
+            } else if (errno == EILSEQ) {
+                iconv_close(cd);
+                throw std::runtime_error("Invalid multibyte sequence in input (EILSEQ)");
+            } else if (errno == EINVAL) {
+                // Incomplete multibyte sequence at end of input
+                // Bazı durumlarda flush ile düzeltilebilir; burada hata veriyoruz.
+                iconv_close(cd);
+                throw std::runtime_error("Incomplete multibyte sequence at end of input (EINVAL)");
+            } else {
+                iconv_close(cd);
+                throw std::runtime_error(std::string("iconv failed: ") + std::strerror(errno));
+            }
+        }
+        // else res != (size_t)-1: dönüştürülen karakter sayısını döndürür (ve in_bytes_left azalır)
+    }
+
+    // Shift-state flush (bazı kodlamalar için gereklidir)
+    // POSIX: iconv(cd, NULL, NULL, &out_ptr, &out_bytes_left) veya &in_bytes_left==0 ile çağrılmalı
+    while (true) {
+        size_t res = iconv(cd, NULL, NULL, &out_ptr, &out_bytes_left);
+        if (res == (size_t)-1) {
+            if (errno == E2BIG) {
+                size_t used = out_buf_size - out_bytes_left;
+                out_buf_size *= 2;
+                out_buf.resize(out_buf_size);
+                out_ptr = out_buf.data() + used;
+                out_bytes_left = out_buf_size - used;
+                continue;
+            } else {
+                iconv_close(cd);
+                throw std::runtime_error(std::string("iconv flush failed: ") + std::strerror(errno));
+            }
+        }
+        break;
+    }
+
+    // Kapat
+    iconv_close(cd);
+
+    // Sonucu kırpıp döndür
+    size_t out_used = out_buf_size - out_bytes_left;
+    return std::string(out_buf.data(), out_used);
 }
 
 std::string DRW_ExtConverter::fromUtf8(std::string *s){
-    return convertByiconv("UTF8", this->encoding, s);
+    return convertByIconv("UTF-8", this->encoding, *s);
 }
 
 std::string DRW_ExtConverter::toUtf8(std::string *s){
-    return convertByiconv(this->encoding, "UTF8", s);
+    return convertByIconv(this->encoding, "UTF-8", *s);
 }
 
 std::string DRW_TextCodec::correctCodePage(const std::string& s) {
