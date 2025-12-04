@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.10 FATAL_ERROR)
-project(libdxfrw VERSION 0.6.3)
+project(libdxfrw VERSION 0.6.3 LANGUAGES C CXX)
+
+# Option: allow user to choose shared or static. Default ON to build shared.
+option(BUILD_SHARED_LIBS "Build libdxfrw as a shared library" ON)
 
 # Enable testing
 enable_testing()
@@ -14,8 +17,7 @@ if(WIN32)
     link_directories(vs2013/packages/libiconv.1.14.0.11/build/native/lib)
     set(ICONV_LIBRARY iconv)
 else()
-    # On Unix-like systems (Linux, macOS)
-    find_package(Iconv REQUIRED)
+    find_package(Iconv QUIET)
     if(Iconv_FOUND)
         include_directories(${Iconv_INCLUDE_DIRS})
         set(ICONV_LIBRARY ${Iconv_LIBRARIES})
@@ -25,65 +27,68 @@ else()
     endif()
 endif()
 
-include_directories(include)
+# Public include dir (install will copy headers)
+include_directories(${CMAKE_SOURCE_DIR}/include)
 
-add_library(dxfrw STATIC ${libdxfrw_sources} ${libdxfrw_intern_sources})
-target_link_libraries(dxfrw ${ICONV_LIBRARY})
+# Add library (shared if BUILD_SHARED_LIBS=ON, static otherwise)
+add_library(dxfrw ${libdxfrw_sources} ${libdxfrw_intern_sources})
 
+# If building shared, define an export macro so headers can use it
+if(BUILD_SHARED_LIBS)
+  target_compile_definitions(dxfrw PRIVATE LIBDXFRW_BUILD_SHARED=1)
+endif()
+
+# Position independent code for shared libs (and modern practice)
+set_target_properties(dxfrw PROPERTIES POSITION_INDEPENDENT_CODE ON)
+
+# Hide symbols by default on GCC/Clang; export via macro header
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(dxfrw PRIVATE -fvisibility=hidden)
+endif()
+
+# Link iconv (if present)
+target_link_libraries(dxfrw PRIVATE ${ICONV_LIBRARY})
+
+# Install rules
 install(FILES ${libdxfrw_headers} DESTINATION include)
 
 if(WIN32)
   install(TARGETS dxfrw
-          CONFIGURATIONS Debug
-          LIBRARY DESTINATION Debug/lib
-          ARCHIVE DESTINATION Debug/lib)
-  install(TARGETS dxfrw
-          CONFIGURATIONS Release
-          LIBRARY DESTINATION Release/lib
-          ARCHIVE DESTINATION Release/lib)
+          RUNTIME DESTINATION bin
+          ARCHIVE DESTINATION lib
+          LIBRARY DESTINATION lib)
 else()
   install(TARGETS dxfrw
           LIBRARY DESTINATION lib
           ARCHIVE DESTINATION lib)
 endif()
 
-# Tests
-add_executable(test_basic tests/test_basic.cpp)
-target_include_directories(test_basic PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_basic dxfrw ${ICONV_LIBRARY})
-add_test(NAME BasicTests COMMAND test_basic)
+# Helper function to add tests (keeps CMake concise)
+function(add_dxfrw_test name src)
+  add_executable(${name} ${src})
+  target_include_directories(${name} PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/include)
+  target_link_libraries(${name} PRIVATE dxfrw ${ICONV_LIBRARY})
+  add_test(NAME ${name} COMMAND ${name})
+endfunction()
 
-add_executable(test_entities tests/test_entities.cpp)
-target_include_directories(test_entities PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_entities dxfrw ${ICONV_LIBRARY})
-add_test(NAME EntityTests COMMAND test_entities)
+add_dxfrw_test(test_basic tests/test_basic.cpp)
+add_dxfrw_test(test_entities tests/test_entities.cpp)
+add_dxfrw_test(test_polylines tests/test_polylines.cpp)
+add_dxfrw_test(test_text tests/test_text.cpp)
+add_dxfrw_test(test_tables tests/test_tables.cpp)
+add_dxfrw_test(test_blocks tests/test_blocks.cpp)
+add_dxfrw_test(test_versions tests/test_versions.cpp)
+add_dxfrw_test(test_errors tests/test_errors.cpp)
 
-add_executable(test_polylines tests/test_polylines.cpp)
-target_include_directories(test_polylines PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_polylines dxfrw ${ICONV_LIBRARY})
-add_test(NAME PolylineTests COMMAND test_polylines)
+# Provide useful messages for users
+message(STATUS "libdxfrw version: ${PROJECT_VERSION}")
+if(BUILD_SHARED_LIBS)
+    message(STATUS "Building as shared library")
+else()
+    message(STATUS "Building as static library")
+endif()
 
-add_executable(test_text tests/test_text.cpp)
-target_include_directories(test_text PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_text dxfrw ${ICONV_LIBRARY})
-add_test(NAME TextTests COMMAND test_text)
-
-add_executable(test_tables tests/test_tables.cpp)
-target_include_directories(test_tables PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_tables dxfrw ${ICONV_LIBRARY})
-add_test(NAME TableTests COMMAND test_tables)
-
-add_executable(test_blocks tests/test_blocks.cpp)
-target_include_directories(test_blocks PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_blocks dxfrw ${ICONV_LIBRARY})
-add_test(NAME BlockTests COMMAND test_blocks)
-
-add_executable(test_versions tests/test_versions.cpp)
-target_include_directories(test_versions PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_versions dxfrw ${ICONV_LIBRARY})
-add_test(NAME VersionTests COMMAND test_versions)
-
-add_executable(test_errors tests/test_errors.cpp)
-target_include_directories(test_errors PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests)
-target_link_libraries(test_errors dxfrw ${ICONV_LIBRARY})
-add_test(NAME ErrorTests COMMAND test_errors)
+# Platform-specific linker advice
+if(APPLE)
+  message(STATUS "On macOS you may need -liconv when linking if iconv isn't in libc")
+endif()
