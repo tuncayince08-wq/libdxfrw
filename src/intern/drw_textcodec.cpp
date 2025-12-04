@@ -471,31 +471,119 @@ std::string DRW_ConvUTF16::toUtf8(std::string *s){//RLZ: pending to write
     return res;
 }
 
-std::string DRW_ExtConverter::convertByiconv(const char *in_encode,
-                                             const char *out_encode,
-                                             const std::string *s) {
-    const int BUF_SIZE = 1000;
-    static char in_buf[BUF_SIZE], out_buf[BUF_SIZE];
+std::string DRW_ExtConverter::convertIconvLenient(const char *in_encode, const char *out_encode, const std::string &s) {
+    iconv_t cd = iconv_open(out_encode, in_encode);
+    if (cd == (iconv_t)-1) {
+        throw std::runtime_error(std::string("iconv_open failed: ") + std::strerror(errno));
+    }
 
-	char *in_ptr = in_buf;
-	char *out_ptr = out_buf;
-    strncpy(in_buf, s->c_str(), BUF_SIZE);
+    // input pointers
+    char *in_ptr = const_cast<char*>(s.data());
+    size_t in_left = s.size();
 
-    iconv_t ic;
-    ic = iconv_open(out_encode, in_encode);
-    size_t il = BUF_SIZE-1, ol = BUF_SIZE-1;
-    iconv(ic , (char**)&in_ptr, &il, &out_ptr, &ol);
-    iconv_close(ic);
+    // output buffer (başlangıç boyutu)
+    size_t out_buf_size = std::max((size_t)64, in_left * 4 + 16);
+    std::vector<char> out_buf(out_buf_size);
+    char *out_ptr = out_buf.data();
+    size_t out_left = out_buf_size;
 
-    return std::string(out_buf);
+    // replacement karakter (UTF-8 olarak '?' ya da 3-byte replacement U+FFFD için "\xEF\xBF\xBD")
+    const char replacement = '?';
+    const char replacement_utf8[] = "\xEF\xBF\xBD"; // U+FFFD (âREPLACEMENT CHARACTERâ), tercihe göre kullan
+
+    while (in_left > 0) {
+        size_t res = iconv(cd, &in_ptr, &in_left, &out_ptr, &out_left);
+        if (res != (size_t)-1) {
+            continue; // dönüştürülen kısımlar işlendi, döngü devam etsin
+        }
+
+        if (errno == E2BIG) {
+            // output buffer doldu -> büyüt
+            size_t used = out_buf_size - out_left;
+            out_buf_size *= 2;
+            out_buf.resize(out_buf_size);
+            out_ptr = out_buf.data() + used;
+            out_left = out_buf_size - used;
+            continue;
+        } else if (errno == EILSEQ) {
+            // Geçersiz sequence: bir baytı atla ve replacement ekle
+            // (bazı durumlarda hatalı sequence daha uzun olabilir; basit çözüm 1 byte atlamak)
+            in_ptr += 1;
+            if (in_left > 0) in_left -= 1;
+
+            // ekleme için yeterli alan yoksa genişlet
+            size_t need = sizeof(replacement_utf8) - 1; // UTF-8 replacement kullanırsan
+            if (out_left < need) {
+                size_t used = out_buf_size - out_left;
+                while (out_buf_size - used < need) out_buf_size *= 2;
+                out_buf.resize(out_buf_size);
+                out_ptr = out_buf.data() + used;
+                out_left = out_buf_size - used;
+            }
+
+            // replacement olarak UTF-8 U+FFFD koy (dilersen tek '?' koy)
+            // memcpy(out_ptr, &replacement, 1); out_ptr += 1; out_left -= 1;
+            memcpy(out_ptr, replacement_utf8, sizeof(replacement_utf8)-1);
+            out_ptr += (sizeof(replacement_utf8)-1);
+            out_left -= (sizeof(replacement_utf8)-1);
+
+            // sonra döngü devam eder
+            continue;
+        } else if (errno == EINVAL) {
+            // incomplete multibyte sequence at end: burayı da atla veya ekle replacement
+            // basitçe aynı şekilde son kalan byte'ları at ve replacement ekle
+            if (in_left > 0) {
+                in_ptr += in_left;
+                in_left = 0;
+                // replacement ekle
+                size_t need = sizeof(replacement_utf8) - 1;
+                if (out_left < need) {
+                    size_t used = out_buf_size - out_left;
+                    while (out_buf_size - used < need) out_buf_size *= 2;
+                    out_buf.resize(out_buf_size);
+                    out_ptr = out_buf.data() + used;
+                    out_left = out_buf_size - used;
+                }
+                memcpy(out_ptr, replacement_utf8, sizeof(replacement_utf8)-1);
+                out_ptr += (sizeof(replacement_utf8)-1);
+                out_left -= (sizeof(replacement_utf8)-1);
+            }
+            break;
+        } else {
+            iconv_close(cd);
+            throw std::runtime_error(std::string("iconv failed: ") + std::strerror(errno));
+        }
+    }
+
+    // flush
+    while (true) {
+        size_t res = iconv(cd, NULL, NULL, &out_ptr, &out_left);
+        if (res != (size_t)-1) break;
+        if (errno == E2BIG) {
+            size_t used = out_buf_size - out_left;
+            out_buf_size *= 2;
+            out_buf.resize(out_buf_size);
+            out_ptr = out_buf.data() + used;
+            out_left = out_buf_size - used;
+            continue;
+        } else {
+            iconv_close(cd);
+            throw std::runtime_error(std::string("iconv flush failed: ") + std::strerror(errno));
+        }
+    }
+
+    iconv_close(cd);
+    size_t used = out_buf_size - out_left;
+    return std::string(out_buf.data(), used);
 }
 
+
 std::string DRW_ExtConverter::fromUtf8(std::string *s){
-    return convertByiconv("UTF8", this->encoding, s);
+    return convertIconvLenient("UTF-8", this->encoding, *s);
 }
 
 std::string DRW_ExtConverter::toUtf8(std::string *s){
-    return convertByiconv(this->encoding, "UTF8", s);
+    return convertIconvLenient(this->encoding, "UTF-8", *s);
 }
 
 std::string DRW_TextCodec::correctCodePage(const std::string& s) {
